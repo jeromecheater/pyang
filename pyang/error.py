@@ -220,12 +220,18 @@ error_codes = \
     'ENUM_VALUE':
       (1,
        'the enumeration value "%s" is not an 32 bit integer'),
+    'BAD_ENUM_VALUE':
+      (1,
+       'the given value "%s" does not match the base enum value "%d"'),
     'DUPLICATE_BIT_POSITION':
       (1,
        'the position "%d" has already been used for the bit at %s'),
     'BIT_POSITION':
       (1,
        'the position value "%s" is not valid'),
+    'BAD_BIT_POSITION':
+      (1,
+       'the given position "%s" does not match the base bit position "%d"'),
     'NEED_KEY':
       (1,
        'the list needs at least one key'),
@@ -349,6 +355,9 @@ error_codes = \
     'BAD_TYPE_IN_KEY':
       (1,
        'the type %s cannot be part of a key, used by leaf %s'),
+    'KEY_BAD_SUBSTMT':
+      (1,
+       'the statement %s cannot be given for a key'),
     'DEFAULT_AND_MANDATORY':
       (1,
        'a \'default\' value cannot be given when \'mandatory\' is "true"'),

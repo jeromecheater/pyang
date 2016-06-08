@@ -32,6 +32,10 @@ class TreePlugin(plugin.PyangPlugin):
             optparse.make_option("--tree-path",
                                  dest="tree_path",
                                  help="Subtree to print"),
+            optparse.make_option("--tree-print-groupings",
+                                 dest="tree_print_groupings",
+                                 action="store_true",
+                                 help="Print groupings"),
             ]
         g = optparser.add_option_group("Tree output specific options")
         g.add_options(optlist)
@@ -78,7 +82,7 @@ Each node is printed as:
    name is printed as <prefix>:<name>.
 
   <opts> is one of:
-    ?  for an optional leaf or choice
+    ?  for an optional leaf, choice, anydata or anyxml
     !  for a presence container
     *  for a leaf-list or list
     [<keys>] for a list's keys
@@ -163,6 +167,19 @@ def emit_tree(ctx, modules, fd, depth, path):
             fd.write("notifications:\n")
             print_children(notifs, module, fd, ' ', path, 'notification', depth)
 
+        if ctx.opts.tree_print_groupings and len(module.i_groupings) > 0:
+            if not printed_header:
+                print_header()
+                printed_header = True
+            fd.write("groupings:\n")
+            for gname in module.i_groupings:
+                fd.write('  ' + gname + '\n')
+                g = module.i_groupings[gname]
+                print_children(g.i_children, module, fd, '   ', path,
+                               'grouping', depth)
+                fd.write('\n')
+
+
 def print_children(i_children, module, fd, prefix, path, mode, depth, width=0):
     if depth == 0:
         if i_children: fd.write(prefix + '     ...\n')
@@ -229,7 +246,8 @@ def print_node(s, module, fd, prefix, path, mode, depth, width):
     else:
         if s.keyword == 'leaf-list':
             name += '*'
-        elif s.keyword == 'leaf' and not hasattr(s, 'i_is_key'):
+        elif (s.keyword == 'leaf' and not hasattr(s, 'i_is_key')
+              or s.keyword == 'anydata' or s.keyword == 'anyxml'):
             m = s.search_one('mandatory')
             if m is None or m.arg == 'false':
                 name += '?'

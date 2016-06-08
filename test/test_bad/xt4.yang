@@ -40,6 +40,7 @@ module xt4 {
   leaf c {
     type leafref {
       path "/a";
+      require-instance true; // error, not allowed in YANG 1.0
     }
   }
 
@@ -57,6 +58,7 @@ module xt4 {
     type instance-identifier {
       require-instance true;
     }
+    description "foo";
   }
 
   deviation /a {

@@ -10,6 +10,96 @@ from . import syntax
 from . import grammar
 from . import xpath
 
+### Functions that plugins can use
+
+def add_validation_phase(phase, before=None, after=None):
+    """Add a validation phase to the framework.
+
+    Can be used by plugins to do special validation of extensions."""
+    idx = 0
+    for x in _validation_phases:
+        if x == before:
+            _validation_phases.insert(idx, phase)
+            return
+        elif x == after:
+            _validation_phases.insert(idx+1, phase)
+            return
+        idx = idx + 1
+    # otherwise append at the end
+    _validation_phases.append(phase)
+
+def add_validation_fun(phase, keywords, f):
+    """Add a validation function to some phase in the framework.
+
+    Function `f` is called for each valid occurance of each keyword in
+    `keywords`.
+    Can be used by plugins to do special validation of extensions."""
+    for keyword in keywords:
+        if (phase, keyword) in _validation_map:
+            oldf = _validation_map[(phase, keyword)]
+            def newf(ctx, s):
+                oldf(ctx, s)
+                f(ctx, s)
+            _validation_map[(phase, keyword)] = newf
+        else:
+            _validation_map[(phase, keyword)] = f
+
+def add_validation_var(var_name, var_fun):
+    """Add a validation variable to the framework.
+
+    Can be used by plugins to do special validation of extensions."""
+    _validation_variables.append((var_name, var_fun))
+
+def set_phase_i_children(phase):
+    """Marks that the phase is run over the expanded i_children.
+
+    Default is to run over substmts."""
+    _v_i_children[phase] = True
+
+def add_keyword_phase_i_children(phase, keyword):
+    """Marks that the stmt is run in the expanded i_children phase."""
+    _v_i_children_keywords[(phase, keyword)] = True
+
+def add_data_keyword(keyword):
+    """Can be used by plugins to register extensions as data keywords."""
+    _data_keywords.append(keyword)
+
+def add_keyword_with_children(keyword):
+    _keyword_with_children[keyword] = True
+
+def is_keyword_with_children(keyword):
+    return keyword in _keyword_with_children
+
+def add_keywords_with_no_explicit_config(keyword):
+    _keywords_with_no_explicit_config.append(keyword)
+
+def add_copy_uses_keyword(keyword):
+    _copy_uses_keywords.append(keyword)
+
+def add_copy_augment_keyword(keyword):
+    _copy_augment_keywords.append(keyword)
+
+def add_xpath_function(name):
+    extra_xpath_functions.append(name)
+
+def add_refinement_element(keyword, element, merge = False, v_fun=None):
+    """Add an element to the <keyword>'s list of refinements"""
+    for (key, valid_keywords, m, v_fun) in _refinements:
+        if key == keyword:
+            valid_keywords.append(element)
+            return
+    _refinements.append((keyword, [element], merge, v_fun))
+
+def add_deviation_element(keyword, element):
+  """Add an element to the <keyword>'s list of deviations.
+
+  Can be used by plugins that add support for specific extension
+  statements."""
+  if keyword in _valid_deviations:
+      _valid_deviations[keyword].append(element)
+  else:
+      _valid_deviations[keyword] = [element]
+
 ### Exceptions
 
 class NotFound(Exception):
@@ -42,69 +132,8 @@ extra_xpath_functions = [
     'deref', # pyang extension for 1.0
     ]
 
-### Validation
-
-def validate_module(ctx, module):
-    """Validate `module`, which is a Statement representing a (sub)module"""
-
-    def iterate(stmt, phase):
-        # if the grammar is not yet checked or if it is checked and
-        # valid, then we continue.
-        if (hasattr(stmt, 'is_grammatically_valid') and
-            stmt.is_grammatically_valid == False):
-            return
-        # first check an exact match
-        key = (phase, stmt.keyword)
-        res = 'recurse'
-        if key in _validation_map:
-            f = _validation_map[key]
-            res = f(ctx, stmt)
-            if res == 'stop':
-                raise Abort
-        # then also run match by special variable
-        for (var_name, var_f) in _validation_variables:
-            key = (phase, var_name)
-            if key in _validation_map and var_f(stmt.keyword) == True:
-                f = _validation_map[key]
-                res = f(ctx, stmt)
-                if res == 'stop':
-                    raise Abort
-        # then run wildcard
-        wildcard = (phase, '*')
-        if wildcard in _validation_map:
-            f = _validation_map[wildcard]
-            res = f(ctx, stmt)
-            if res == 'stop':
-                raise Abort
-        if res == 'continue':
-            pass
-        else:
-            # default is to recurse
-            if phase in _v_i_children:
-                if stmt.keyword == 'grouping':
-                    return
-                if stmt.i_module is not None and stmt.i_module != module:
-                    # this means that the stmt is from an included, expanded
-                    # submodule - already validated.
-                    return
-                if hasattr(stmt, 'i_children'):
-                    for s in stmt.i_children:
-                        iterate(s, phase)
-                for s in stmt.substmts:
-                    if (hasattr(s, 'i_has_i_children') or
-                        (phase, s.keyword) in _v_i_children_keywords):
-                        iterate(s, phase)
-            else:
-                for s in stmt.substmts:
-                    iterate(s, phase)
-
-    module.i_is_validated = 'in_progress'
-    try:
-        for phase in _validation_phases:
-            iterate(module, phase)
-    except Abort:
-        pass
-    module.i_is_validated = True
+data_definition_keywords = ['container', 'leaf', 'leaf-list', 'list',
+                            'choice', 'anyxml', 'anydata', 'uses', 'augment']
 
 _validation_phases = [
     # init phase:
@@ -269,7 +298,7 @@ _validation_variables = [
     ]
 
 _data_keywords = ['leaf', 'leaf-list', 'container', 'list', 'choice', 'case',
-                  'anyxml', 'action', 'rpc', 'notification']
+                  'anyxml', 'anydata', 'action', 'rpc', 'notification']
 
 _keywords_with_no_explicit_config = ['action', 'rpc', 'notification']
 
@@ -277,76 +306,119 @@ _copy_uses_keywords = []
 
 _copy_augment_keywords = []
 
-def add_validation_phase(phase, before=None, after=None):
-    """Add a validation phase to the framework.
+_refinements = [
+    # (<keyword>, <list of keywords for which <keyword> can be refined>,
+    #  <merge>, <validation function>)
+    ('description',
+     ['container', 'leaf', 'leaf-list', 'list', 'choice', 'case',
+      'anyxml', 'anydata'],
+     False, None),
+    ('reference',
+     ['container', 'leaf', 'leaf-list', 'list', 'choice', 'case',
+      'anyxml', 'anydata'],
+     False, None),
+    ('config',
+     ['container', 'leaf', 'leaf-list', 'list', 'choice', 'anyxml', 'anydata'],
+     False, None),
+    ('presence', ['container'], False, None),
+    ('must', ['container', 'leaf', 'leaf-list', 'list', 'anyxml', 'anydata'],
+     True, None),
+    ('default', ['leaf', 'choice'],
+     False, lambda ctx, target, default: v_default(ctx, target, default)),
+    ('mandatory', ['leaf', 'choice', 'anyxml', 'anydata'], False, None),
+    ('min-elements', ['leaf-list', 'list'], False, None),
+    ('max-elements', ['leaf-list', 'list'], False, None),
+    ('if-feature',
+     ['container', 'leaf', 'leaf-list', 'list', 'choice', 'case',
+      'anyxml', 'anydata'],
+     True, None),
+]
 
-    Can be used by plugins to do special validation of extensions."""
-    idx = 0
-    for x in _validation_phases:
-        if x == before:
-            _validation_phases.insert(idx, phase)
+_singleton_keywords = {
+    'type':True,
+    'units':True,
+    'default':True,
+    'config':True,
+    'mandatory':True,
+    'min-elements':True,
+    'max-elements':True
+    }
+
+_valid_deviations = {
+    'type':['leaf', 'leaf-list'],
+    'units':['leaf', 'leaf-list'],
+    'default':['leaf', 'choice'],
+    'config':['leaf', 'choice', 'container', 'list', 'leaf-list'],
+    'mandatory':['leaf', 'choice'],
+    'min-elements':['leaf-list', 'list'],
+    'max-elements':['leaf-list', 'list'],
+    'must':['leaf', 'choice', 'container', 'list', 'leaf-list'],
+    'unique':['list'],
+}
+
+### Validation
+
+def validate_module(ctx, module):
+    """Validate `module`, which is a Statement representing a (sub)module"""
+
+    def iterate(stmt, phase):
+        # if the grammar is not yet checked or if it is checked and
+        # valid, then we continue.
+        if (hasattr(stmt, 'is_grammatically_valid') and
+            stmt.is_grammatically_valid == False):
             return
-        elif x == after:
-            _validation_phases.insert(idx+1, phase)
-            return
-        idx = idx + 1
-    # otherwise append at the end
-    _validation_phases.append(phase)
-
-def add_validation_fun(phase, keywords, f):
-    """Add a validation function to some phase in the framework.
-
-    Function `f` is called for each valid occurance of each keyword in
-    `keywords`.
-    Can be used by plugins to do special validation of extensions."""
-    for keyword in keywords:
-        if (phase, keyword) in _validation_map:
-            oldf = _validation_map[(phase, keyword)]
-            def newf(ctx, s):
-                oldf(ctx, s)
-                f(ctx, s)
-            _validation_map[(phase, keyword)] = newf
+        # first check an exact match
+        key = (phase, stmt.keyword)
+        res = 'recurse'
+        if key in _validation_map:
+            f = _validation_map[key]
+            res = f(ctx, stmt)
+            if res == 'stop':
+                raise Abort
+        # then also run match by special variable
+        for (var_name, var_f) in _validation_variables:
+            key = (phase, var_name)
+            if key in _validation_map and var_f(stmt.keyword) == True:
+                f = _validation_map[key]
+                res = f(ctx, stmt)
+                if res == 'stop':
+                    raise Abort
+        # then run wildcard
+        wildcard = (phase, '*')
+        if wildcard in _validation_map:
+            f = _validation_map[wildcard]
+            res = f(ctx, stmt)
+            if res == 'stop':
+                raise Abort
+        if res == 'continue':
+            pass
         else:
-            _validation_map[(phase, keyword)] = f
+            # default is to recurse
+            if phase in _v_i_children:
+                if stmt.keyword == 'grouping':
+                    return
+                if stmt.i_module is not None and stmt.i_module != module:
+                    # this means that the stmt is from an included, expanded
+                    # submodule - already validated.
+                    return
+                if hasattr(stmt, 'i_children'):
+                    for s in stmt.i_children:
+                        iterate(s, phase)
+                for s in stmt.substmts:
+                    if (hasattr(s, 'i_has_i_children') or
+                        (phase, s.keyword) in _v_i_children_keywords):
+                        iterate(s, phase)
+            else:
+                for s in stmt.substmts:
+                    iterate(s, phase)
 
-def add_validation_var(var_name, var_fun):
-    """Add a validation variable to the framework.
-
-    Can be used by plugins to do special validation of extensions."""
-    _validation_variables.append((var_name, var_fun))
-
-def set_phase_i_children(phase):
-    """Marks that the phase is run over the expanded i_children.
-
-    Default is to run over substmts."""
-    _v_i_children[phase] = True
-
-def add_keyword_phase_i_children(phase, keyword):
-    """Marks that the stmt is run in the expanded i_children phase."""
-    _v_i_children_keywords[(phase, keyword)] = True
-
-def add_data_keyword(keyword):
-    _data_keywords.append(keyword)
-
-def add_keyword_with_children(keyword):
-    _keyword_with_children[keyword] = True
-
-def is_keyword_with_children(keyword):
-    return keyword in _keyword_with_children
-
-def add_keywords_with_no_explicit_config(keyword):
-    _keywords_with_no_explicit_config.append(keyword)
-
-def add_copy_uses_keyword(keyword):
-    _copy_uses_keywords.append(keyword)
-
-def add_copy_augment_keyword(keyword):
-    _copy_augment_keywords.append(keyword)
-
-def add_xpath_function(name):
-    extra_xpath_functions.append(name)
-
-###
+    module.i_is_validated = 'in_progress'
+    try:
+        for phase in _validation_phases:
+            iterate(module, phase)
+    except Abort:
+        pass
+    module.i_is_validated = True
 
 def v_init_module(ctx, stmt):
     ## remember that the grammar is not validated
@@ -451,7 +523,11 @@ def v_grammar_module(ctx, stmt):
     grammar.chk_module_statements(ctx, stmt, ctx.canonical)
     # check revision statements order
     prev = None
+    stmt.i_latest_revision = None
     for r in stmt.search('revision'):
+        if (stmt.i_latest_revision is None or
+            r.arg > stmt.i_latest_revision):
+            stmt.i_latest_revision = r.arg
         if prev is not None and r.arg > prev:
             err_add(ctx.errors, r.pos, 'REVISION_ORDER', ())
         prev = r.arg
@@ -1230,10 +1306,6 @@ def v_prune_module(ctx, stmt):
 
 ### Expand phases
 
-data_definition_keywords = ['container', 'leaf', 'leaf-list', 'list',
-                            'choice', 'anyxml', 'uses', 'augment']
-
-
 def v_expand_1_children(ctx, stmt):
     if (hasattr(stmt, 'is_grammatically_valid') and
         stmt.is_grammatically_valid == False):
@@ -1242,7 +1314,8 @@ def v_expand_1_children(ctx, stmt):
         # already expanded
         return
     elif stmt.keyword == 'choice':
-        shorthands = ['leaf', 'leaf-list', 'container', 'list', 'anyxml']
+        shorthands = ['leaf', 'leaf-list', 'container', 'list',
+                      'anyxml', 'anydata']
         for s in stmt.substmts:
             if s.keyword in shorthands:
                 # create an artifical case node for the shorthand
@@ -1318,38 +1391,6 @@ def v_expand_1_children(ctx, stmt):
 
     # do not recurse - recursion already done above
     return 'continue'
-
-_refinements = [
-    # (<keyword>, <list of keywords for which <keyword> can be refined>,
-    #  <merge>, <validation function>)
-    ('description',
-     ['container', 'leaf', 'leaf-list', 'list', 'choice', 'case', 'anyxml'],
-     False, None),
-    ('reference',
-     ['container', 'leaf', 'leaf-list', 'list', 'choice', 'case', 'anyxml'],
-     False, None),
-    ('config',
-     ['container', 'leaf', 'leaf-list', 'list', 'choice', 'anyxml'],
-     False, None),
-    ('presence', ['container'], False, None),
-    ('must', ['container', 'leaf', 'leaf-list', 'list', 'anyxml'], True, None),
-    ('default', ['leaf', 'choice'],
-     False, lambda ctx, target, default: v_default(ctx, target, default)),
-    ('mandatory', ['leaf', 'choice', 'anyxml'], False, None),
-    ('min-elements', ['leaf-list', 'list'], False, None),
-    ('max-elements', ['leaf-list', 'list'], False, None),
-    ('if-feature',
-     ['container', 'leaf', 'leaf-list', 'list', 'choice', 'case', 'anyxml'],
-     True, None),
-]
-
-def add_refinement_element(keyword, element, merge = False, v_fun=None):
-    """Add an element to the <keyword>'s list of refinements"""
-    for (key, valid_keywords, m, v_fun) in _refinements:
-        if key == keyword:
-            valid_keywords.append(element)
-            return
-    _refinements.append((keyword, [element], merge, v_fun))
 
 def v_default(ctx, target, default):
     type_ = target.search_one('type')
@@ -1596,8 +1637,10 @@ def v_expand_2_augment(ctx, stmt):
     # if we're augmenting another module, make sure we're not
     # trying to add a mandatory node
     if stmt.i_module.i_modulename != stmt.i_target_node.i_module.i_modulename:
-        for sc in stmt.i_children:
-            chk_mandatory(sc)
+        # 1.1 allows mandatory augment if the augment is conditional
+        if stmt.i_module.i_version == '1' or stmt.search_one('when') is None:
+            for sc in stmt.i_children:
+                chk_mandatory(sc)
 
     # copy the expanded children into the target node
     def add_tmp_children(node, tmp_children):
@@ -1605,7 +1648,7 @@ def v_expand_2_augment(ctx, stmt):
             ch = search_child(node.i_children, stmt.i_module.i_modulename,
                               tmp.arg)
             if ch is not None:
-                del stmt.i_module.i_undefined_augment_nodes[tmp]
+                del ch.i_module.i_undefined_augment_nodes[tmp]
                 if not hasattr(ch, 'i_children'):
                     err_add(ctx.errors, tmp.pos, 'BAD_NODE_IN_AUGMENT',
                             (stmt.i_module.i_modulename, ch.arg,
@@ -1614,7 +1657,7 @@ def v_expand_2_augment(ctx, stmt):
                 add_tmp_children(ch, tmp.i_children)
             elif node.keyword == 'choice' and tmp.keyword != 'case':
                 # create an artifical case node for the shorthand
-                new_case = create_new_case(ctx, node, tmp)
+                new_case = create_new_case(ctx, node, tmp, expand=False)
                 new_case.parent = node
             else:
                 node.i_children.append(tmp)
@@ -1629,7 +1672,7 @@ def v_expand_2_augment(ctx, stmt):
             if ch.keyword == '__tmp_augment__':
                 # replace this node with the proper one,
                 # and also do this recursively
-                del stmt.i_module.i_undefined_augment_nodes[ch]
+                del ch.i_module.i_undefined_augment_nodes[ch]
                 if not hasattr(c, 'i_children'):
                     err_add(ctx.errors, stmt.pos, 'BAD_NODE_IN_AUGMENT',
                             (stmt.i_module.i_modulename, c.arg,
@@ -1648,7 +1691,7 @@ def v_expand_2_augment(ctx, stmt):
                 return
         elif stmt.i_target_node.keyword == 'choice' and c.keyword != 'case':
             # create an artifical case node for the shorthand
-            new_case = create_new_case(ctx, stmt.i_target_node, c)
+            new_case = create_new_case(ctx, stmt.i_target_node, c, expand=False)
             new_case.parent = stmt.i_target_node
             v_inherit_properties(ctx, stmt.i_target_node, new_case)
         else:
@@ -1664,14 +1707,15 @@ def v_expand_2_augment(ctx, stmt):
             stmt.i_target_node.substmts.append(s)
             s.parent = stmt.i_target_node
 
-def create_new_case(ctx, choice, child):
+def create_new_case(ctx, choice, child, expand=True):
     new_case = Statement(child.top, child.parent, child.pos, 'case', child.arg)
     v_init_stmt(ctx, new_case)
     new_child = child.copy(new_case)
     new_case.i_children = [new_child]
     new_case.i_module = child.i_module
     choice.i_children.append(new_case)
-    v_expand_1_children(ctx, new_child)
+    if expand:
+        v_expand_1_children(ctx, new_child)
     return new_case
 
 ### Unique name check phase
@@ -1772,11 +1816,18 @@ def v_reference_list(ctx, stmt):
                             return
                 default = ptr.search_one('default')
                 if default is not None:
-                    err_add(ctx.errors, default.pos, 'KEY_HAS_DEFAULT', ())
+                        err_add(ctx.errors, default.pos, 'KEY_HAS_DEFAULT', ())
+                for substmt in ['if-feature', 'when']:
+                    s = ptr.search_one(substmt)
+                    if s is not None:
+                        err_add(ctx.errors, s.pos, 'KEY_BAD_SUBSTMT', substmt)
                 mandatory = ptr.search_one('mandatory')
                 if mandatory is not None and mandatory.arg == 'false':
                     err_add(ctx.errors, mandatory.pos,
                             'KEY_HAS_MANDATORY_FALSE', ())
+                when_ = ptr.search_one('when')
+                if when_ is not None:
+                    err_add(ctx.errors, when_.pos, 'KEY_HAS_DEFAULT', ())
 
                 if ptr.i_config != stmt.i_config:
                     err_add(ctx.errors, ptr.search_one('config').pos,
@@ -1959,35 +2010,6 @@ def v_reference_when(ctx, stmt):
 
 def v_reference_deviation(ctx, stmt):
     stmt.i_target_node = find_target_node(ctx, stmt)
-
-_singleton_keywords = {
-    'type':True,
-    'units':True,
-    'default':True,
-    'config':True,
-    'mandatory':True,
-    'min-elements':True,
-    'max-elements':True
-    }
-
-_valid_deviations = {
-    'type':['leaf', 'leaf-list'],
-    'units':['leaf', 'leaf-list'],
-    'default':['leaf', 'choice'],
-    'config':['leaf', 'choice', 'container', 'list', 'leaf-list'],
-    'mandatory':['leaf', 'choice'],
-    'min-elements':['leaf-list', 'list'],
-    'max-elements':['leaf-list', 'list'],
-    'must':['leaf', 'choice', 'container', 'list', 'leaf-list'],
-    'unique':['list'],
-}
-
-def add_deviation_element(keyword, element):
-  """Add an element to the <keyword>'s list of deviations"""
-  if keyword in _valid_deviations:
-      _valid_deviations[keyword].append(element)
-  else:
-      _valid_deviations[keyword] = [element]
 
 def v_reference_deviate(ctx, stmt):
     if stmt.parent.i_target_node is None:
@@ -2193,6 +2215,8 @@ def has_type(type, names):
     return None
 
 def is_mandatory_node(stmt):
+    if hasattr(stmt, 'i_config') and stmt.i_config == False:
+        return False
     if stmt.keyword == 'leaf':
         m = stmt.search_one('mandatory')
         if m is not None and m.arg == 'true':
@@ -2402,17 +2426,31 @@ def validate_leafref_path(ctx, stmt, path_spec, path,
 
     pathpos = path.pos
 
+    # Unprefixed paths in typedefs in YANG 1 were underspecified.  In
+    # YANG 1.1 the semantics are defined.  The code below is compatible
+    # with old pyang for YANG 1 modules.
+
     # If an un-prefixed identifier is found, it defaults to the
     # module where the path is defined, except if found within
     # a grouping, in which case it default to the module where the
     # grouping is used.
     if (path.parent.parent is not None and
         path.parent.parent.keyword == 'typedef'):
-        local_module = path.i_module
+        if path.i_module.i_version == '1':
+            local_module = path.i_module
+        else:
+            local_module = stmt.i_module
     elif stmt.keyword == 'module':
         local_module = stmt
     else:
-        local_module = stmt.i_module
+        if path.i_module.i_version == '1':
+            local_module = stmt.i_module
+        else:
+            local_module = path.i_module
+    if stmt.keyword == 'typedef':
+        in_typedef = True
+    else:
+        in_typedef = False
 
     def find_identifier(identifier):
         if util.is_prefixed(identifier):
@@ -2422,6 +2460,8 @@ def validate_leafref_path(ctx, stmt, path_spec, path,
             if pmodule is None:
                 raise NotFound
             return (pmodule, name)
+        elif in_typedef and stmt.i_module.i_version != '1':
+            raise Abort
         else: # local identifier
             return (local_module, identifier)
 
@@ -2543,9 +2583,6 @@ def validate_leafref_path(ctx, stmt, path_spec, path,
                         (ptr.i_module.arg, ptr.arg, stmt.arg, stmt.pos))
                 raise NotFound
             if ptr.keyword in _keyword_with_children:
-#['list', 'container', 'case', 'grouping',
-#                               'module', 'submodule', 'input', 'output',
-#                               'notification']:
                 ptr = search_data_node(ptr.i_children, module_name, name,
                                        last_skipped)
                 if not is_submodule_included(path, ptr):
