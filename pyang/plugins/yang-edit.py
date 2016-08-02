@@ -57,6 +57,12 @@ class YANGEditPlugin(yang.YANGPlugin):
                            help="Set import/include revision-date "
                            "statements to match imported/included "
                            "modules/submodules"),
+            YANGEditOption("--yang-edit-delete-import-dates",
+                           dest="yang_edit_delete_import_dates",
+                           default=False,
+                           action="store_true",
+                           help="Delete import/include revision-date "
+                           "statements"),
 
             # set meta info
             YANGEditOption("--yang-edit-organization",
@@ -117,6 +123,7 @@ class YANGEditPlugin(yang.YANGPlugin):
     #     continue?
     def emit(self, ctx, modules, fd):
         update_import_dates = ctx.opts.yang_edit_update_import_dates
+        delete_import_dates = ctx.opts.yang_edit_delete_import_dates
 
         header = {
             "yang-version": ctx.opts.yang_edit_yang_version,
@@ -135,13 +142,16 @@ class YANGEditPlugin(yang.YANGPlugin):
             "reference": ctx.opts.yang_edit_revision_reference,
         }
         
-        hooks = YANGEditEmitHooks(update_import_dates, header, meta, revision)
+        hooks = YANGEditEmitHooks(update_import_dates, delete_import_dates,
+                                  header, meta, revision)
         module = modules[0]
         yang.emit_yang(ctx, hooks, module, fd)
 
 class YANGEditEmitHooks(yang.YANGEmitHooks):
-    def __init__(self, update_import_dates, header, meta, revision):
+    def __init__(self, update_import_dates, delete_import_dates,
+                 header, meta, revision):
         self._update_import_dates = update_import_dates
+        self._delete_import_dates = delete_import_dates
 
         self._header = header
         self._meta = meta
@@ -162,6 +172,9 @@ class YANGEditEmitHooks(yang.YANGEmitHooks):
         elif self._update_import_dates and keyword in ["import", "include"]:
             self._update_import_date(ctx, stmt)
 
+        elif self._delete_import_dates and keyword in ["import", "include"]:
+            self._delete_import_date(ctx, stmt)
+
         elif keyword in self._meta.keys():
             self._set_meta_details(ctx, stmt)
 
@@ -179,6 +192,12 @@ class YANGEditEmitHooks(yang.YANGEmitHooks):
 
         if not imprev or impmodrevdate > imprevdate:
             update_or_add_stmt(stmt, "revision-date", impmodrevdate)
+
+    def _delete_import_date(self, ctx, stmt):
+        imprev = stmt.search_one("revision-date")
+
+        if imprev:
+            delete_stmt(stmt, imprev)
 
     def _set_header_details(self, ctx, stmt):
         for keyword in self._header.keys():
@@ -229,6 +248,9 @@ def get_arg_value(arg, currarg=None):
                         else:
                             argval = currarg.replace(old, new)
                         replace = True
+                    elif spec == "%DELETE":
+                        argval = ""
+                        replace = True
                     else:
                         argval += spec
                 elif spec[0] == "@":
@@ -272,6 +294,13 @@ def update_or_add_stmt(stmt, keyword, arg, pos=None):
             pos -= 1
         stmt.substmts.insert(pos, child)
     return child
+
+# XXX is there a proper function for this?
+def delete_stmt(parent, stmt):
+    if stmt in parent.substmts:
+        idx = parent.substmts.index(stmt)
+        del parent.substmts[idx]
+    del stmt
 
 def get_newest_submodule(ctx, mod, level, newest=None):
     if newest is None:
