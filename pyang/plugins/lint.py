@@ -247,6 +247,9 @@ def v_chk_module_name(ctx, stmt, modulename_prefixes):
         err_add(ctx.errors, stmt.pos, 'LINT_NO_MODULENAME_PREFIX', ())
 
 def v_chk_include(ctx, stmt):
+    # Only evaluate the submodule revision rule for the main module
+    if stmt.i_orig_module.keyword == 'submodule':
+        return
     latest = stmt.i_orig_module.i_latest_revision
     if latest is None:
         return
