@@ -14,8 +14,8 @@ from . import grammar
 from . import util
 from . import statements
 
-__version__ = '1.7'
-__date__ = '2016-06-16'
+__version__ = '1.7.1'
+__date__ = '2016-11-02'
 
 class Context(object):
     """Class which encapsulates a parse session"""
@@ -166,15 +166,17 @@ class Context(object):
                     format = util.guess_format(text)
 
                 if format == 'yin':
+                    yintext = text
                     p = yin_parser.YinParser({'no_include':True,
                                               'no_extensions':True})
                 else:
+                    yintext = None
                     p = yang_parser.YangParser()
 
                 module = p.parse(self, ref, text)
                 if module is not None:
                     rev = util.get_latest_revision(module)
-                    revs[i] = (rev, ('parsed', module, ref))
+                    revs[i] = (rev, ('parsed', module, ref, yintext))
             i += 1
 
     def search_module(self, pos, modulename, revision=None):
@@ -221,12 +223,19 @@ class Context(object):
         elif handle[0] == 'parsed':
             module = handle[1]
             ref = handle[2]
+            yintext = handle[3]
             if modulename != module.arg:
                 error.err_add(self.errors, module.pos, 'BAD_MODULE_NAME',
                               (module.arg, ref, modulename))
                 module = None
-            else:
+            elif yintext is None:
                 module = self.add_parsed_module(handle[1])
+            else:
+                p = yin_parser.YinParser()
+                self.yin_module_map[module.arg] = []
+                module = p.parse(self, ref, yintext)
+                if module is not None:
+                    module = self.add_parsed_module(module)
         else:
             # get it from the repos
             try:
@@ -364,6 +373,7 @@ class FileRepository(Repository):
         Repository.__init__(self)
         self.dirs = path.split(os.pathsep)
         self.no_path_recurse = no_path_recurse
+        self.modules = None
 
         if use_env:
             modpath = os.getenv('YANG_MODPATH')
@@ -377,11 +387,28 @@ class FileRepository(Repository):
             inst = os.getenv('YANG_INSTALL')
             if inst is not None:
                 self.dirs.append(os.path.join(inst, 'yang', 'modules'))
-            else:
-                self.dirs.append(os.path.join(sys.prefix,
-                                              'share','yang','modules'))
+                return  # skip search if install location is indicated
 
-        self.modules = None
+            default_install = os.path.join(sys.prefix,
+                                           'share','yang','modules')
+            if os.path.exists(default_install):
+                self.dirs.append(default_install)
+                return  # end search if default location exists
+
+            # for some systems, sys.prefix returns `/usr`
+            # but the real location is `/usr/local`
+            # if the package is installed with pip
+            # this information can be easily retrieved
+            import pkgutil
+            if not pkgutil.find_loader('pip'):
+                return  # abort search if pip is not installed
+
+            import pip
+            location = pip.locations.distutils_scheme('pyang')
+            self.dirs.append(os.path.join(location['data'],
+                                          'share','yang','modules'))
+
+
 
     def _setup(self, ctx):
         # check all dirs for yang and yin files

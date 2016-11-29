@@ -239,6 +239,8 @@ _validation_map = {
         lambda ctx, s: v_unique_name_defintions(ctx, s),
     ('unique_name', '$has_children'): \
         lambda ctx, s: v_unique_name_children(ctx, s),
+    ('unique_name', 'leaf-list'): \
+        lambda ctx, s: v_unique_name_leaf_list(ctx, s),
 
     ('reference_1', 'list'):lambda ctx, s:v_reference_list(ctx, s),
     ('reference_1', 'choice'):lambda ctx, s: v_reference_choice(ctx, s),
@@ -708,7 +710,7 @@ def v_type_typedef(ctx, stmt):
         # ensure the type is validated
         v_type_type(ctx, type_)
         # check the direct typedef
-        if (type_.i_typedef is not None and 
+        if (type_.i_typedef is not None and
             type_.i_typedef.is_grammatically_valid == True):
             v_type_typedef(ctx, type_.i_typedef)
         # check all union's types
@@ -881,6 +883,9 @@ def v_type_type(ctx, stmt):
         err_add(ctx.errors, bases[0].pos, 'BAD_RESTRICTION', 'base')
     elif len(bases) > 1 and stmt.i_module.i_version == '1':
         err_add(ctx.errors, bases[1].pos, 'UNEXPECTED_KEYWORD', 'base')
+    elif stmt.arg == 'identityref' and bases == []:
+        err_add(ctx.errors, stmt.pos, 'MISSING_TYPE_SPEC',
+                ('identityref', 'base'))
     else:
         idbases = []
         for base in bases:
@@ -909,8 +914,12 @@ def v_type_type(ctx, stmt):
         ('enum' not in stmt.i_type_spec.restrictions() or
          stmt.i_module.i_version == '1' and stmt.arg != 'enumeration')):
         err_add(ctx.errors, enums[0].pos, 'BAD_RESTRICTION', 'enum')
+    elif stmt.arg == 'enumeration' and enums == []:
+        err_add(ctx.errors, stmt.pos, 'MISSING_TYPE_SPEC',
+                ('enumeration', 'enum'))
     elif enums != []:
         stmt.i_is_derived = True
+
         enum_spec = types.validate_enums(ctx.errors, enums, stmt)
         if enum_spec is not None:
             stmt.i_type_spec = types.EnumTypeSpec(stmt.i_type_spec,
@@ -923,6 +932,9 @@ def v_type_type(ctx, stmt):
         ('bit' not in stmt.i_type_spec.restrictions() or
          stmt.i_module.i_version == '1' and stmt.arg != 'bits')):
         err_add(ctx.errors, bits[0].pos, 'BAD_RESTRICTION', 'bit')
+    elif stmt.arg == 'bits' and bits == []:
+        err_add(ctx.errors, stmt.pos, 'MISSING_TYPE_SPEC',
+                ('bits', 'bit'))
     elif bits != []:
         stmt.i_is_derived = True
         bit_spec = types.validate_bits(ctx.errors, bits, stmt)
@@ -1320,7 +1332,7 @@ def v_expand_1_children(ctx, stmt):
         # already expanded
         return
     elif stmt.keyword == 'choice':
-        shorthands = ['leaf', 'leaf-list', 'container', 'list',
+        shorthands = ['leaf', 'leaf-list', 'container', 'list', 'choice',
                       'anyxml', 'anydata']
         for s in stmt.substmts:
             if s.keyword in shorthands:
@@ -1709,14 +1721,7 @@ def v_expand_2_augment(ctx, stmt):
             stmt.i_target_node.i_children.append(c)
             c.parent = stmt.i_target_node
             v_inherit_properties(ctx, stmt.i_target_node, c)
-    if_features = stmt.search('if-feature')
-    # XXX these additional child if-feature statements cause problems for
-    #     output formats, so mark them to make it easy to ignore them
     for s in stmt.substmts:
-        for f in if_features:
-            c = Statement(f.top, stmt.parent, f.pos, f.keyword, f.arg)
-            c._ignored_by_output_format_ = True
-            s.substmts.append(c)
         if s.keyword in _copy_augment_keywords:
             stmt.i_target_node.substmts.append(s)
             s.parent = stmt.i_target_node
@@ -1784,6 +1789,18 @@ def v_unique_name_children(ctx, stmt):
     for c in chs:
         check(c)
 
+def v_unique_name_leaf_list(ctx, stmt):
+    """Make sure config true leaf-lists do nothave duplicate defaults"""
+
+    if not stmt.i_config:
+        return
+    seen = []
+    for defval in stmt.i_default:
+        if defval in seen:
+            err_add(ctx.errors, stmt.pos, 'DUPLICATE_DEFAULT', (defval))
+        else:
+            seen.append(defval)
+
 ### Reference phase
 
 def v_reference_list(ctx, stmt):
@@ -1839,9 +1856,6 @@ def v_reference_list(ctx, stmt):
                 if mandatory is not None and mandatory.arg == 'false':
                     err_add(ctx.errors, mandatory.pos,
                             'KEY_HAS_MANDATORY_FALSE', ())
-                when_ = ptr.search_one('when')
-                if when_ is not None:
-                    err_add(ctx.errors, when_.pos, 'KEY_HAS_DEFAULT', ())
 
                 if ptr.i_config != stmt.i_config:
                     err_add(ctx.errors, ptr.search_one('config').pos,
@@ -2060,7 +2074,14 @@ def v_reference_deviate(ctx, stmt):
             del t.parent.substmts[idx]
     elif stmt.arg == 'add':
         for c in stmt.substmts:
-            if c.keyword in _singleton_keywords:
+            if (c.keyword == 'config'
+                and hasattr(t, 'i_config')):
+                # config is special: since it is an inherited property
+                # with a default, all nodes has a config property.  this means
+                # that it can only be replaced.
+                err_add(ctx.errors, c.pos, 'BAD_DEVIATE_ADD',
+                        (c.keyword, t.i_module.arg, t.arg))
+            elif c.keyword in _singleton_keywords:
                 if t.search_one(c.keyword) != None:
                     err_add(ctx.errors, c.pos, 'BAD_DEVIATE_ADD',
                             (c.keyword, t.i_module.arg, t.arg))
@@ -2426,7 +2447,7 @@ def iterate_i_children(stmt, f):
 def is_submodule_included(src, tgt):
     """Check that the tgt's submodule is included by src, if they belong
     to the same module."""
-    if tgt is None:
+    if tgt is None or not hasattr(tgt, 'i_orig_module'):
         return True
     if (tgt.i_orig_module.keyword == 'submodule' and
         src.i_orig_module != tgt.i_orig_module and
@@ -2450,7 +2471,7 @@ def validate_leafref_path(ctx, stmt, path_spec, path,
 
     # If an un-prefixed identifier is found, it defaults to the
     # module where the path is defined, except if found within
-    # a grouping, in which case it default to the module where the
+    # a grouping, in which case it defaults to the module where the
     # grouping is used.
     if (path.parent.parent is not None and
         path.parent.parent.keyword == 'typedef'):
@@ -2461,10 +2482,7 @@ def validate_leafref_path(ctx, stmt, path_spec, path,
     elif stmt.keyword == 'module':
         local_module = stmt
     else:
-        if path.i_module.i_version == '1':
-            local_module = stmt.i_module
-        else:
-            local_module = path.i_module
+        local_module = stmt.i_module
     if stmt.keyword == 'typedef':
         in_typedef = True
     else:
